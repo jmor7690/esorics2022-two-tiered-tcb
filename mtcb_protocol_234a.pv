@@ -1,0 +1,442 @@
+(******************************************************
+  Protocols for a Two-Tiered Trusted Computing Base
+
+  - Protocol 2: Secure Boot
+  - Protocol 3: Attestation
+  - Protocol 4: E-TCB Recovery (Part I: Memory corruption detection)
+ ******************************************************)
+ 
+set preciseActions = true.
+
+(* ===================
+   Equational theories
+   =================== *)
+
+(* Hashing *)
+fun h(bitstring): bitstring.
+
+(* Symmetric encryption *)
+type skey.
+fun senc(bitstring, skey): bitstring.
+fun sdec(bitstring, skey): bitstring.
+equation forall m:bitstring, k:skey; sdec(senc(m,k),k)=m.
+equation forall m:bitstring, k:skey; senc(sdec(m,k),k)=m.
+
+(* MAC *)
+type mkey.
+fun mac(bitstring, mkey): bitstring.
+reduc forall m:bitstring, k:mkey; getmess_mac(mac(m,k))=m.
+
+(* KDF *)
+fun kdf_mac(bitstring): mkey.
+
+(* Signatures *)
+type sskey.
+type spkey.
+fun spk(sskey): spkey.
+fun sign(bitstring, sskey): bitstring.
+reduc forall m:bitstring, k:sskey; getmess(sign(m,k))=m.
+reduc forall m:bitstring, k:sskey; checksign(sign(m,k),spk(k))=m.
+
+
+
+(* ============================
+   Types, free names and tables
+   ============================ *)
+
+type nonce.
+type boot_instance.
+
+type os_action.
+const OS_LEGITIMATE:os_action.
+
+type etcb_action.
+const ETCB_LEGITIMATE:etcb_action.
+
+type flag.
+free SAFE_MODE_ON:flag.
+free MTCB_CONTINUE:flag.
+free CPU_CONTINUE:flag.
+
+type id.
+
+(* Convenience hash functions to avoid dealing with type conversion *)
+letfun h_os(oa:os_action) = h((oa, 0)).
+letfun h_etcb(ea:etcb_action) = h((ea, 0)).
+fun h_id(bitstring):id.
+
+(* Stores boot instance configurations, with OS and E-TCB feed from adversary-controlled store *)
+table instances_table(boot_instance, os_action, etcb_action).
+table flags_table(boot_instance, flag).                 (* Stores signaling flags *)
+table mtcb_lts_table(id, bitstring).                    (* Stores M-TCB long-term secret *)
+table etcb_lts_table(id, bitstring).                    (* Stores E-TCB long-term secret *)
+table mtcb_bootsecret_table(boot_instance, bitstring).  (* Stores M-TCB boot secret per instance *)
+table etcb_bootsecret_table(boot_instance, bitstring).  (* Stores E-TCB boot secret per instance *)
+
+
+
+(* ========
+   Channels
+   ======== *)
+
+free c:channel.
+free os_etcb_channel:channel.
+free etcb_to_mtcb_channel:channel.
+free mtcb_to_etcb_channel:channel.
+
+
+pred IsLegitimateEtcb(etcb_action).
+clauses IsLegitimateEtcb(ETCB_LEGITIMATE).
+
+pred IsLegitimateOs(os_action).
+clauses IsLegitimateOs(OS_LEGITIMATE).
+
+(* ==================
+   Events and queries
+   ================== *)
+
+event VerifierGeneratesChallenge(nonce).
+event VerifierValidatesSignature(nonce, bitstring).
+event VerifierValidatesAttestation(nonce, bitstring).
+
+event MtcbGeneratesSignature(boot_instance, nonce, bitstring).
+event MtcbAkep2Running(id, id, bitstring).
+event MtcbAkep2Commit(id, id, bitstring).
+event MtcbDetectsCorruption(boot_instance, os_action, etcb_action).
+event MtcbEndProtocol4(boot_instance, os_action, etcb_action).
+
+event OsLoaded(boot_instance, os_action).
+event OsStarts(boot_instance, os_action).
+event OsAttackEvent(boot_instance).
+
+event EtcbLoaded(boot_instance, etcb_action).
+event EtcbStarts(boot_instance, etcb_action).
+event EtcbAttackEvent(boot_instance).
+event EtcbAkep2Running(id, id, bitstring).
+event EtcbAkep2Commit(id, id, bitstring).
+
+event PlatformBoots(boot_instance).
+event MtcbForcesReboot(boot_instance).
+
+event AttackEvent(boot_instance).
+event AttackEventMemoryCorruption(boot_instance, os_action, etcb_action).
+
+
+(* Queries for AKEP2 *)
+query id_mtcb:id, id_etcb:id, n:bitstring; event(MtcbAkep2Commit(id_mtcb, id_etcb, n)).
+query id_mtcb:id, id_etcb:id, n:bitstring; event(EtcbAkep2Commit(id_etcb, id_mtcb, n)).
+query id_mtcb:id, id_etcb:id, n:bitstring; inj-event(MtcbAkep2Commit(id_mtcb, id_etcb, n)) ==> inj-event(EtcbAkep2Running(id_etcb, id_mtcb, n)).
+query id_mtcb:id, id_etcb:id, n:bitstring; inj-event(EtcbAkep2Commit(id_etcb, id_mtcb, n)) ==> inj-event(MtcbAkep2Running(id_mtcb, id_etcb,n)).
+
+
+(* Queries for Protocol 2 - Secure Boot *)
+query instance:boot_instance, ea:etcb_action; event(EtcbStarts(instance, ea)).
+query instance:boot_instance, oa:os_action; event(OsStarts(instance, oa)).
+
+query instance:boot_instance, ea:etcb_action, oa':os_action, ea':etcb_action;
+    event(EtcbStarts(instance, ea)) ==> IsLegitimateEtcb(ea) || event(AttackEventMemoryCorruption(instance, oa', ea')).
+
+query instance:boot_instance, oa:os_action, oa':os_action, ea':etcb_action;
+    event(OsStarts(instance, oa)) ==> IsLegitimateOs(oa)|| event(AttackEventMemoryCorruption(instance, oa', ea')).
+
+
+(* Queries for Protocol 3 - Attestation *)
+query instance:boot_instance; event(AttackEvent(instance)).
+query instance:boot_instance; event(OsAttackEvent(instance)).
+query instance:boot_instance; event(EtcbAttackEvent(instance)).
+query challenge:nonce, signature:bitstring; event(VerifierValidatesAttestation(challenge, signature)).
+query instance:boot_instance, challenge:nonce, signature:bitstring; event(MtcbGeneratesSignature(instance, challenge, signature)).
+
+
+query challenge:nonce, instance:boot_instance, signature:bitstring;
+    event (VerifierValidatesAttestation(challenge, signature)) &&
+    event(AttackEvent(instance)) &&
+    event(MtcbGeneratesSignature(instance, challenge, signature)).
+
+
+query challenge:nonce, instance:boot_instance, signature:bitstring, oa':os_action, ea':etcb_action;
+    event(VerifierValidatesSignature(challenge, signature)) ==>
+        (
+            event(MtcbGeneratesSignature(instance, challenge, signature)) ==>
+            (
+                event(VerifierGeneratesChallenge(challenge)) &&
+                event(EtcbStarts(instance, ETCB_LEGITIMATE)) &&
+                event(EtcbLoaded(instance, ETCB_LEGITIMATE)) &&
+                event(OsLoaded(instance, OS_LEGITIMATE))
+            )
+        ) || event(AttackEventMemoryCorruption(instance, oa', ea')).
+
+query challenge:nonce, instance:boot_instance, signature:bitstring, oa':os_action, ea':etcb_action;
+    event(VerifierValidatesAttestation(challenge, signature)) ==>
+        (
+            event(MtcbGeneratesSignature(instance, challenge, signature)) ==>
+            (
+                event(VerifierGeneratesChallenge(challenge)) &&
+                event(EtcbStarts(instance, ETCB_LEGITIMATE)) &&
+                event(EtcbLoaded(instance, ETCB_LEGITIMATE)) &&
+                event(OsLoaded(instance, OS_LEGITIMATE))
+            )
+        ) || event(AttackEventMemoryCorruption(instance, oa', ea')).
+
+
+(* Queries for Protocol 4 - E-TCB Recovery (Part I: Memory corruption detection) *)
+query instance:boot_instance; event(MtcbForcesReboot(instance)).
+
+query instance:boot_instance, oa:os_action, ea:etcb_action;
+    event(AttackEventMemoryCorruption(instance, oa, ea)) && event(MtcbEndProtocol4(instance, oa, ea)) && event(MtcbForcesReboot(instance)).
+
+query instance:boot_instance, oa:os_action, ea:etcb_action;
+    event(MtcbForcesReboot(instance)) ==> event(AttackEventMemoryCorruption(instance, oa, ea)).
+
+
+
+(* =====================
+   Processes definitions
+   ===================== *)
+
+(*** OS PROCESS ***)
+
+(* OS Protocol 3 - Attestation *)
+let OS_Protocol3(instance:boot_instance) =
+    in(c, xChallenge:nonce);
+    out(os_etcb_channel, xChallenge);
+    in(os_etcb_channel, xSignature:bitstring);
+    out(c, xSignature).
+
+
+(* OS *)
+let OS(instance:boot_instance) =
+    get instances_table(=instance, xOsAction, xEtcbAction) in
+    event OsStarts(instance, xOsAction);
+    if xOsAction = OS_LEGITIMATE then (     (* Branch to differentiate legitimate/malicious OS actions *)
+        !OS_Protocol3(instance)
+    ) else (
+        event AttackEvent(instance);
+        event OsAttackEvent(instance)
+    ).
+
+
+
+(*** E-TCB PROCESS ***)
+
+(* E-TCB AKEP2 - Boot Secret Derivation *)
+let ETCB_AKEP2(instance:boot_instance, lts:bitstring) =
+    let k_akep2 = kdf_mac((lts, instance)) in
+    new nonce_etcb:nonce;
+    let id_etcb = h_id(lts) in
+    out(etcb_to_mtcb_channel, (id_etcb, nonce_etcb));
+    in(mtcb_to_etcb_channel, xMac:bitstring);
+    let (id_mtcb:id, =id_etcb, =nonce_etcb, nonce_mtcb:nonce) = getmess_mac(xMac) in
+    if mac((id_mtcb, id_etcb, nonce_etcb, nonce_mtcb), k_akep2) = xMac then
+    event EtcbAkep2Running(id_etcb, id_mtcb, (id_etcb, id_mtcb, nonce_etcb, nonce_mtcb));
+    out(etcb_to_mtcb_channel, mac((id_etcb, nonce_mtcb), k_akep2));
+    insert etcb_bootsecret_table(instance, (lts, nonce_mtcb));
+    event EtcbAkep2Commit(id_etcb, id_mtcb, (id_etcb, id_mtcb, nonce_etcb, nonce_mtcb)).
+
+(* E-TCB Protocol 2 - Secure Boot *)
+let ETCB_Protocol2(instance:boot_instance, hOs_ref:bitstring) =
+    get instances_table(=instance, xOsAction, xEtcbAction) in
+    let os_measurement = h_os(xOsAction) in
+    if os_measurement = hOs_ref then
+    (
+        get etcb_lts_table(id_mtcb, lts) in
+        ETCB_AKEP2(instance, lts)
+    )
+    | OS(instance).
+
+
+(* E-TCB Protocol 3 - Attestation *)
+let ETCB_Protocol3(instance: boot_instance) =
+    get etcb_bootsecret_table(=instance, boot_secret) in
+    get instances_table(=instance, xOsAction, xEtcbAction) in
+    in(os_etcb_channel, xChallenge:nonce);
+    let os_measurement = h_os(xOsAction) in
+    let k_mac = kdf_mac(boot_secret) in
+    out(etcb_to_mtcb_channel, (xChallenge, os_measurement, mac((xChallenge, os_measurement), k_mac)));
+    in(mtcb_to_etcb_channel, xSignature:bitstring);
+    out(os_etcb_channel, xSignature).
+
+
+(* E-TCB *)
+let ETCB(instance:boot_instance, hOs_ref:bitstring) =
+    get instances_table(=instance, xOsAction, xEtcbAction) in
+    event EtcbStarts(instance, xEtcbAction);
+    if xEtcbAction = ETCB_LEGITIMATE then (     (* Branch to differentiate legitimate/malicious E-TCB actions *)
+        ETCB_Protocol2(instance, hOs_ref)
+        | !ETCB_Protocol3(instance)
+
+    ) else (
+        event AttackEvent(instance);
+        event EtcbAttackEvent(instance);
+        OS(instance)
+    ).
+
+
+
+
+(*** M-TCB PROCESS ***)
+
+(* M-TCB AKEP2 - Boot Secret Derivation *)
+let MTCB_AKEP2(instance:boot_instance, id_mtcb:id, lts:bitstring) =
+    let k_akep2 = kdf_mac((lts, instance)) in
+    let id_etcb = h_id(lts) in
+    in(etcb_to_mtcb_channel, (=id_etcb, nonce_etcb:nonce));
+    new nonce_mtcb:nonce;
+    event MtcbAkep2Running(id_mtcb, id_etcb, (id_etcb, id_mtcb, nonce_etcb, nonce_mtcb));
+    out(mtcb_to_etcb_channel, mac((id_mtcb, id_etcb, nonce_etcb, nonce_mtcb), k_akep2));
+    in(etcb_to_mtcb_channel, xMac:bitstring);
+    if mac((id_etcb, nonce_mtcb), k_akep2) = xMac then
+    insert mtcb_bootsecret_table(instance, (lts, nonce_mtcb));
+    event MtcbAkep2Commit(id_mtcb, id_etcb, (id_etcb, id_mtcb, nonce_etcb, nonce_mtcb)).
+
+
+(* M-TCB Protocol 2 - Secure Boot *)
+let MTCB_Protocol2(instance:boot_instance, id_mtcb:id, hEtcb_ref:bitstring) =
+    get flags_table(=instance, =MTCB_CONTINUE) in
+    get instances_table(=instance, xOsAction, xEtcbAction) in
+    let etcb_measurement = h_etcb(xEtcbAction) in
+    if etcb_measurement = hEtcb_ref then    (* Comment this line to show attack on Protocol 2 *)
+    insert flags_table(instance, CPU_CONTINUE);
+
+    (* Create LTS if not defined - first boot only *)
+    get mtcb_lts_table(=id_mtcb, lts) in
+        MTCB_AKEP2(instance, id_mtcb, lts)
+    else
+        new lts:bitstring;
+        insert mtcb_lts_table(id_mtcb, lts);
+        insert etcb_lts_table(id_mtcb, lts);
+        MTCB_AKEP2(instance, id_mtcb, lts).
+
+
+(* M-TCB Protocol 3 - Attestation *)
+let MTCB_Protocol3(instance:boot_instance, id_mtcb:id, ssk_mtcb:sskey) =
+    in(etcb_to_mtcb_channel, (xChallenge:nonce, xOs_measurement:bitstring, xMac:bitstring));
+    get mtcb_bootsecret_table(=instance, boot_secret) in
+    let k_mac = kdf_mac(boot_secret) in
+    if xMac = mac((xChallenge, xOs_measurement), k_mac) then
+    get instances_table(=instance, xOsAction, xEtcbAction) in
+    let etcb_measurement = h_etcb(xEtcbAction) in
+    let signature = sign((id_mtcb, xChallenge, xOs_measurement, etcb_measurement), ssk_mtcb) in
+    event MtcbGeneratesSignature(instance, xChallenge, signature);
+    out(mtcb_to_etcb_channel, signature).
+
+
+(* M-TCB Protocol 4 - ETCB Recovery *)
+let MTCB_Protocol4(instance:boot_instance, hEtcb_ref:bitstring) =
+    get mtcb_bootsecret_table(=instance, boot_secret_ignored) in (* This would prevent Protocol 4 from running before Protocol 2 has finished. boot_secret is not needed P4 can run independently from P2 *)
+    get instances_table(=instance, xOsAction, xEtcbAction) in    (* If there is a memory corruption attack after secure boot, then E-TCB might be malicious *)
+    let etcb_measurement = h_etcb(xEtcbAction) in
+    if etcb_measurement <> hEtcb_ref then
+        event MtcbDetectsCorruption(instance, xOsAction, xEtcbAction);
+        insert flags_table(instance, SAFE_MODE_ON);
+        event MtcbForcesReboot(instance);                        (* M-TCB detects the attack and forces reboot *)
+
+        (* Once an attack has been detected by Protocol 4, and the M-TCB determines that the system
+           must be rebooted in safe mode, the E-TCB recovery procedure starts at this point.
+           This functionality of Protocol 4 is encoded in a separate file: mtcb_protocol_4.pv *)
+
+        event MtcbEndProtocol4(instance, xOsAction, xEtcbAction)
+    else
+        event MtcbEndProtocol4(instance, xOsAction, xEtcbAction).
+
+
+(* M-TCB *)
+let MTCB(instance:boot_instance, id_mtcb:id, ssk_mtcb:sskey, hEtcb_ref:bitstring) =
+    MTCB_Protocol2(instance, id_mtcb, hEtcb_ref)
+    | !MTCB_Protocol4(instance, hEtcb_ref)
+    | !MTCB_Protocol3(instance, id_mtcb, ssk_mtcb).
+
+
+
+
+(*** CPU PROCESS ***)
+
+(* Protocol 2 - Secure Boot *)
+let CPU_Protocol2(instance:boot_instance, hOs_ref:bitstring) =
+    insert flags_table(instance, MTCB_CONTINUE);
+    get flags_table(=instance, =CPU_CONTINUE) in
+    ETCB(instance, hOs_ref).
+
+
+(* CPU *)
+let CPU(instance:boot_instance, hOs_ref:bitstring) =
+    CPU_Protocol2(instance, hOs_ref).
+
+
+
+
+(*** VERIFIER PROCESS ***)
+
+(* Protocol 3 - Attestation *)
+let Verifier_Protocol3(mtcb_spk:spkey) =
+    let hEtcb_ref = h_etcb(ETCB_LEGITIMATE) in  (* Reference measurement for E-TCB *)
+    let hOs_ref = h_os(OS_LEGITIMATE) in        (* Reference measurement for OS *)
+
+    new challenge:nonce;
+    event VerifierGeneratesChallenge(challenge);
+    out(c, challenge);
+    in(c, xSignature:bitstring);
+    let (id_mtcb:id, =challenge, xOs_measurement:bitstring, xEtcb_measurement:bitstring) = getmess(xSignature) in
+    if checksign(xSignature, mtcb_spk) = (id_mtcb, challenge, xOs_measurement, xEtcb_measurement) then (
+        event VerifierValidatesSignature(challenge, xSignature);
+        if xOs_measurement = hOs_ref &&
+           xEtcb_measurement = hEtcb_ref then
+           event VerifierValidatesAttestation(challenge, xSignature)
+    ).
+
+
+(* Verifier *)
+let Verifier(mtcb_spk:spkey) =
+    !Verifier_Protocol3(mtcb_spk).
+
+
+
+
+(*** MEMORY CORRUPTION PROCESS ***)
+
+(* This process models E-TCB memory corruption capabilities of the adversary *)
+let MemoryCorruptionAttack(instance:boot_instance, xOsAction:os_action, xEtcbAction:etcb_action) =
+    in(c, (=xOsAction, xEtcbAction':etcb_action));      (* To help termination, we assume the adversary only changes E-TCB *)
+    if xEtcbAction' <> xEtcbAction then
+        event AttackEventMemoryCorruption(instance, xOsAction, xEtcbAction');
+        insert instances_table(instance, xOsAction, xEtcbAction').
+        (* At this point, instances_table might contain a legitimate and malicious E-TCBs.
+           Since we assume the adversary might freely change the memory contents, the M-TCB
+           will read the memory in one of these states, but ProVerif does not
+           know which one will be retrieved (although it will reason for all the possible states).
+           In a real scenario, probabilistically, the M-TCB will eventually identify the memory
+           corruption attack, if it chooses an approppriate frequency of memory reads. *)
+
+
+
+(*** MAIN PROCESS ***)
+
+process
+    (* We create an arbitrary number of platforms *)
+    !(
+        new id_mtcb:id;
+        out(c, id_mtcb);
+        new ssk_mtcb:sskey;
+        let mtcb_spk = spk(ssk_mtcb) in
+        out(c, mtcb_spk);
+
+        (* For each platform, we allow an arbitrary number of boots *)
+        !(
+            (* Input OS and ETCB from adversary-controlled store *)
+            in(c, (xOsAction:os_action, xEtcbAction:etcb_action));
+            new instance:boot_instance;
+            insert instances_table(instance, xOsAction, xEtcbAction);
+
+            event PlatformBoots(instance);
+            event OsLoaded(instance, xOsAction);
+            event EtcbLoaded(instance, xEtcbAction);
+
+            let hEtcb_ref = h_etcb(ETCB_LEGITIMATE) in  (* Reference measurement for E-TCB *)
+            let hOs_ref = h_os(OS_LEGITIMATE) in        (* Reference measurement for OS *)
+            (
+                CPU(instance, hOs_ref)
+                | MTCB(instance, id_mtcb, ssk_mtcb, hEtcb_ref)
+                | ! MemoryCorruptionAttack(instance, xOsAction, xEtcbAction)
+            )
+        ) | Verifier(mtcb_spk)
+    )

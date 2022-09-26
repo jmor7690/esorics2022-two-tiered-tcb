@@ -1,0 +1,193 @@
+(******************************************************
+  Protocols for a Two-Tiered Trusted Computing Base
+
+  - Protocol 1: A/B Update
+ ******************************************************)
+
+
+(* ===================
+   Equational theories
+   =================== *)
+
+(* Hashing *)
+fun h(bitstring): bitstring.
+
+(* Symmetric encryption *)
+type skey.
+fun senc(bitstring, skey): bitstring.
+fun sdec(bitstring, skey): bitstring.
+equation forall m:bitstring, k:skey; sdec(senc(m,k),k)=m.
+equation forall m:bitstring, k:skey; senc(sdec(m,k),k)=m.
+
+(* MAC *)
+type mkey.
+fun mac(bitstring, mkey): bitstring.
+reduc forall m:bitstring, k:mkey; getmess_mac(mac(m,k))=m.
+
+(* KDF *)
+fun kdf_mac(bitstring): mkey.
+
+(* Signatures *)
+type sskey.
+type spkey.
+fun spk(sskey): spkey.
+fun sign(bitstring, sskey): bitstring.
+reduc forall m:bitstring, k:sskey; getmess(sign(m,k))=m.
+reduc forall m:bitstring, k:sskey; checksign(sign(m,k),spk(k))=m.
+
+
+
+(* ============================
+   Types, free names and tables
+   ============================ *)
+
+free NULL_SPKEY:spkey.
+
+type firmware.
+const NULL_FIRMWARE:firmware.
+type command_code.
+const SECUREUPDATE:command_code.
+
+type pointer.
+const PT_SLOT_B: pointer.
+const PT_SLOT_A: pointer.
+
+type id.
+
+table vendor_firmware_table(firmware).
+
+
+
+(* ========
+   Channels
+   ======== *)
+
+free c:channel.
+
+
+
+(* ==================
+   Events and queries
+   ================== *)
+
+event MtcbInstalls(id, pointer, nat, firmware, spkey).
+event MtcbStarts(id, pointer, nat, firmware, spkey).
+event VendorCreates(nat, firmware).
+
+query id_mtcb:id, pt:pointer, ver:nat, fw:firmware, spk_root:spkey; event(MtcbInstalls(id_mtcb, pt, ver, fw, spk_root)).
+query id_mtcb:id, pt:pointer, ver:nat, fw:firmware, spk_root:spkey; event(MtcbStarts(id_mtcb, pt, ver, fw, spk_root)).
+
+query id_mtcb:id, pt:pointer, ver:nat, fw:firmware, spk_root:spkey; event(MtcbInstalls(id_mtcb, pt, ver, fw, spk_root)) ==> event(VendorCreates(ver, fw)).
+query id_mtcb:id, pt:pointer, ver:nat, fw:firmware, spk_root:spkey;
+    event(MtcbStarts(id_mtcb, pt, ver, fw, spk_root)) ==> (event(MtcbInstalls(id_mtcb, pt, ver, fw, spk_root)) ==> event(VendorCreates(ver, fw))).
+
+query id_mtcb:id, t_1:time, pt_1:pointer, ver_1:nat, fw_1:firmware, spk_root_1:spkey, t_2:time, pt_2:pointer, ver_2:nat, fw_2:firmware, spk_root_2:spkey;
+    event(MtcbStarts(id_mtcb, pt_1, ver_1, fw_1, spk_root_1))@t_1 && event(MtcbStarts(id_mtcb, pt_2, ver_2, fw_2, spk_root_2))@t_2  ==>
+    ((t_1 <= t_2) && (ver_1 <= ver_2)) || ((t_2 <= t_1) && (ver_2 <= ver_1)).
+
+
+
+(* =====================
+   Processes definitions
+   ===================== *)
+
+(*** M-TCB PROCESS ***)
+
+let MTCB(id_mtcb:id, xVer_0:nat, xFw_0:firmware, xSpk_root_0:spkey) =
+    let slotA_0 = (xVer_0, xFw_0, xSpk_root_0) in
+    let slotB_0 = (0, NULL_FIRMWARE, NULL_SPKEY) in
+    let pointer_0 = PT_SLOT_A in
+    event MtcbInstalls(id_mtcb, pointer_0, xVer_0, xFw_0, xSpk_root_0);
+    (
+        reboot_0
+    ).
+
+@macro reboot_i {
+    if pointer_i = PT_SLOT_A then (
+        processA_i    (* MTCB_Protocol1 in A *)
+    ) else (
+        processB_i    (* MTCB_Protocol1 in B *)
+    )
+} { 0 }
+
+@macro processA_i {
+    let (ver_i:nat, fw_i:firmware, spk_root_i:spkey) = slotA_i in
+    event MtcbStarts(id_mtcb, pointer_i, ver_i, fw_i, spk_root_i);
+    get vendor_firmware_table(=fw_i) in (
+        secureUpdateBSlot_i
+    )
+}{ }
+
+@macro secureUpdateBSlot_i {
+    in(c, (=SECUREUPDATE, xSignedMessage_i':bitstring));
+    let (xVer_i':nat, xFw_i':firmware, xSpk_root_i':spkey) = checksign(xSignedMessage_i', spk_root_i) in (
+        if ver_i < xVer_i' then (
+            let slotA_i' = slotA_i in
+            let slotB_i' = (xVer_i', xFw_i', xSpk_root_i') in
+            let pointer_i' = PT_SLOT_B in
+            event MtcbInstalls(id_mtcb, pointer_i', xVer_i', xFw_i', xSpk_root_i');
+            reboot_i'
+        )
+    )
+}{ }
+
+@macro processB_i {
+    let (ver_i:nat, fw_i:firmware, spk_root_i:spkey) = slotB_i in
+    event MtcbStarts(id_mtcb, pointer_i, ver_i, fw_i, spk_root_i);
+    get vendor_firmware_table(=fw_i) in (
+        secureUpdateASlot_i
+    )
+}{ }
+
+@macro secureUpdateASlot_i {
+    in(c, (=SECUREUPDATE, xSignedMessage_i':bitstring));
+    let (xVer_i':nat, xFw_i':firmware, xSpk_root_i':spkey) = checksign(xSignedMessage_i', spk_root_i) in (
+        if ver_i < xVer_i' then (
+            let slotA_i' = (xVer_i', xFw_i', xSpk_root_i') in
+            let slotB_i' = slotB_i in
+            let pointer_i' = PT_SLOT_A in
+            event MtcbInstalls(id_mtcb, pointer_i', xVer_i', xFw_i', xSpk_root_i');
+            reboot_i'
+        )
+    )
+}{ }
+
+
+
+(*** VENDOR PROCESS ***)
+
+let Vendor(ssk_root_0:sskey) =
+    processVendor_0
+
+@macro processVendor_j {
+    new fw_j': firmware;
+    event VendorCreates(j', fw_j');
+    insert vendor_firmware_table(fw_j');
+    new ssk_root_j': sskey;
+    let spk_root_j' = spk(ssk_root_j') in
+    out(c, spk_root_j');
+    out(c, sign((j', fw_j', spk_root_j'), ssk_root_j));
+    processVendor_j'
+}{ 0. }
+
+
+
+(*** MAIN PROCESS ***)
+
+process
+    new ssk_root_0: sskey;
+    let spk_root_0 = spk(ssk_root_0) in
+    out(c, spk_root_0);
+    new fw_0: firmware;
+    event VendorCreates(0, fw_0);
+    insert vendor_firmware_table(fw_0);
+
+    (
+        (* We create an arbitrary number of platforms initialized with firmware fw_0 *)
+        !(
+            new id_mtcb:id;
+            out(c, id_mtcb);
+            MTCB(id_mtcb, 0, fw_0, spk_root_0)
+        )
+        | Vendor(ssk_root_0)
+    )
